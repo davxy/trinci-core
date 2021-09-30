@@ -22,6 +22,7 @@ use super::{
 use crate::{
     base::{Mutex, RwLock},
     channel::confirmed_channel,
+    consensus::raft::Raft,
     db::Db,
     wm::Wm,
 };
@@ -59,10 +60,10 @@ pub struct BlockService<D: Db, W: Wm> {
 
 impl<D: Db, W: Wm> BlockService<D, W> {
     /// Create a new blockchain service instance.
-    pub fn new(config: BlockConfig, db: D, wm: W) -> Self {
+    pub fn new(config: BlockConfig, db: D, wm: W, consensus: Option<Raft>) -> Self {
         let (tx_chan, rx_chan) = confirmed_channel::<Message, Message>();
 
-        let mut worker = BlockWorker::new(config, db, wm, rx_chan);
+        let mut worker = BlockWorker::new(config, db, wm, rx_chan, consensus);
         let db = worker.db_arc();
         let wm = worker.wm_arc();
 
@@ -151,7 +152,7 @@ mod tests {
             network: "skynet".to_string(),
         };
 
-        BlockService::new(config, db, wm)
+        BlockService::new(config, db, wm, None)
     }
 
     #[test]

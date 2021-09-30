@@ -31,6 +31,7 @@ mod macros;
 pub mod base;
 pub mod blockchain;
 pub mod channel;
+pub mod consensus;
 pub mod crypto;
 pub mod db;
 pub mod error;

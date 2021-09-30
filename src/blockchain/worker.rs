@@ -19,8 +19,9 @@ use crate::{
     base::{Mutex, RwLock},
     blockchain::{
         builder::Builder, dispatcher::Dispatcher, executor::Executor, message::*, pool::*,
-        pubsub::PubSub, BlockConfig,
+        pubsub::PubSub, BlockConfig, Event,
     },
+    consensus::raft::Raft,
     db::Db,
     wm::Wm,
 };
@@ -42,6 +43,10 @@ pub struct BlockWorker<D: Db, W: Wm> {
     db: Arc<RwLock<D>>,
     /// Wasm machine shared reference.
     wm: Arc<Mutex<W>>,
+    /// Consensus module.
+    consensus: Option<Arc<RwLock<Raft>>>,
+    /// PubSub module.
+    pubsub: Arc<Mutex<PubSub>>,
     /// Blockchain requests receiver.
     rx_chan: BlockRequestReceiver,
     /// Dispatcher subsystem, in charge of handling incoming blockchain messages.
@@ -50,29 +55,51 @@ pub struct BlockWorker<D: Db, W: Wm> {
     builder: Builder<D>,
     /// Executor subsystem, in charge of executing block transactions.
     executor: Executor<D, W>,
-    ///
+    /// Synchronization subsystem, in charge of node synchronization.
     synchronizer: Synchronizer<D>,
-    /// Builder running flag.
+    /// Builder is running.
     building: Arc<AtomicBool>,
-    /// Executor running flag.
+    /// Executor is running.
     executing: Arc<AtomicBool>,
-    ///
+    /// Synchronizer is running.
     synchronizing: Arc<AtomicBool>,
 }
 
 impl<D: Db, W: Wm> BlockWorker<D, W> {
-    pub fn new(config: BlockConfig, db: D, wm: W, rx_chan: BlockRequestReceiver) -> Self {
+    pub fn new(
+        config: BlockConfig,
+        db: D,
+        wm: W,
+        rx_chan: BlockRequestReceiver,
+        consensus: Option<Raft>,
+    ) -> Self {
         let pool = Arc::new(RwLock::new(Pool::default()));
         let pubsub = Arc::new(Mutex::new(PubSub::new()));
 
         let config = Arc::new(config);
         let db = Arc::new(RwLock::new(db));
         let wm = Arc::new(Mutex::new(wm));
+        let consensus = if config.validator {
+            consensus.map(|cons| Arc::new(RwLock::new(cons)))
+        } else {
+            None
+        };
 
-        let dispatcher = Dispatcher::new(config.clone(), pool.clone(), db.clone(), pubsub.clone());
-        let builder = Builder::new(config.threshold, pool.clone(), db.clone());
+        let dispatcher = Dispatcher::new(
+            config.clone(),
+            pool.clone(),
+            db.clone(),
+            consensus.clone(),
+            pubsub.clone(),
+        );
+        let builder = Builder::new(
+            config.threshold,
+            pool.clone(),
+            db.clone(),
+            consensus.clone(),
+        );
         let executor = Executor::new(pool.clone(), db.clone(), wm.clone(), pubsub.clone());
-        let synchronizer = Synchronizer::new(pool, db.clone(), pubsub);
+        let synchronizer = Synchronizer::new(pool, db.clone(), pubsub.clone());
 
         let building = Arc::new(AtomicBool::new(false));
         let executing = Arc::new(AtomicBool::new(false));
@@ -82,6 +109,8 @@ impl<D: Db, W: Wm> BlockWorker<D, W> {
             config,
             db,
             wm,
+            consensus,
+            pubsub,
             rx_chan,
             dispatcher,
             builder,
@@ -149,12 +178,35 @@ impl<D: Db, W: Wm> BlockWorker<D, W> {
         });
     }
 
+    fn consensus_worker(raft: Arc<RwLock<Raft>>, pubsub: Arc<Mutex<PubSub>>) {
+        // Give chance to the system to properly boot-up.
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        loop {
+            let election_timeout = std::time::Duration::from_secs(3);
+            raft.write().leader_alive = false;
+            std::thread::sleep(election_timeout);
+            if !raft.read().leader_alive {
+                let buf = raft.write().vote_request();
+                let msg = Message::Consensus { buf };
+                pubsub.lock().publish(Event::CONSENSUS, msg)
+            }
+        }
+    }
+
     /// Blockchain worker asynchronous task.
     /// This can be stopped by submitting a `Stop` message to its input channel.
     pub async fn run(&mut self) {
         let timeout = self.config.timeout as u64;
         let threshold = self.config.threshold;
         let mut sleep = Box::pin(task::sleep(Duration::from_secs(timeout)));
+
+        if let Some(ref consensus) = self.consensus {
+            let consensus = consensus.clone();
+            let pubsub = self.pubsub.clone();
+            std::thread::spawn(move || {
+                Self::consensus_worker(consensus, pubsub);
+            });
+        }
 
         let future = future::poll_fn(move |cx: &mut Context<'_>| -> Poll<()> {
             while sleep.poll_unpin(cx).is_ready() {

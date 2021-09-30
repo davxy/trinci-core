@@ -35,6 +35,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 const NODE_TOPIC: &str = "node";
+const VALIDATOR_TOPIC: &str = "validator";
 
 fn build_transport(keypair: &Keypair) -> Boxed<(PeerId, StreamMuxerBox)> {
     let tcp_config = TcpConfig::new();
@@ -91,11 +92,29 @@ pub async fn run_async(config: Arc<PeerConfig>, block_tx: BlockRequestSender) {
         }
     };
 
-    let topic = config.network.to_owned() + "-" + NODE_TOPIC;
-    let topic = IdentTopic::new(topic);
+    // Subscribe to consensus algorithm events.
+    let mut validator_rx = match block_tx
+        .send(Message::Subscribe {
+            id: "p2p".to_owned(),
+            events: Event::CONSENSUS,
+            packed: false,
+        })
+        .await
+    {
+        Ok(chan) => chan,
+        Err(_err) => {
+            error!("Starting p2p worked. Blockchain channel is closed");
+            return;
+        }
+    };
+
+    let node_topic = IdentTopic::new(config.network.to_owned() + "-" + NODE_TOPIC);
+    let validator_topic = IdentTopic::new(config.network.to_owned() + "-" + VALIDATOR_TOPIC);
+    let topics = vec![&node_topic, &validator_topic];
 
     let transport = build_transport(&keypair);
-    let behaviour = Behavior::new(peer_id, topic.clone(), block_tx).unwrap();
+
+    let behaviour = Behavior::new(peer_id, topics, block_tx).unwrap();
     let mut swarm: Swarm<Behavior> = Swarm::new(transport, behaviour, peer_id);
 
     let addr = format!("/ip4/{}/tcp/0", config.addr);
@@ -109,18 +128,41 @@ pub async fn run_async(config: Arc<PeerConfig>, block_tx: BlockRequestSender) {
 
     let future = future::poll_fn(move |cx: &mut Context<'_>| -> Poll<()> {
         loop {
+            match validator_rx.poll_next_unpin(cx) {
+                Poll::Ready(Some(msg)) => match msg {
+                    Message::Consensus { buf } => {
+                        let behavior = swarm.behaviour_mut();
+                        if let Err(err) = behavior.gossip.publish(validator_topic.clone(), buf) {
+                            if !matches!(err, PublishError::InsufficientPeers) {
+                                error!("publish error: {:?}", err);
+                            }
+                        }
+                    }
+                    _ => warn!("unexpected message from blockchain: {:?}", msg),
+                },
+                Poll::Ready(None) => {
+                    warn!("blockchain channel has been closed, exiting");
+                    return Poll::Ready(());
+                }
+                Poll::Pending => {
+                    break;
+                }
+            }
+        }
+
+        loop {
             match block_rx.poll_next_unpin(cx) {
                 Poll::Ready(Some(msg)) => match msg {
                     Message::Packed { buf } => {
+                        warn!("[p2p] message {}", hex::encode(&buf));
                         let behavior = swarm.behaviour_mut();
-
                         for peer in behavior.gossip.all_peers() {
                             trace!("ALL-PEER: {:?}", peer);
                         }
                         for peer in behavior.gossip.all_mesh_peers() {
                             trace!("MESH-PEER: {:?}", peer);
                         }
-                        if let Err(err) = behavior.gossip.publish(topic.clone(), buf) {
+                        if let Err(err) = behavior.gossip.publish(node_topic.clone(), buf) {
                             if !matches!(err, PublishError::InsufficientPeers) {
                                 error!("publish error: {:?}", err);
                             }

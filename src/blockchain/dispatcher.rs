@@ -42,6 +42,7 @@ use crate::{
         pubsub::{Event, PubSub},
         BlockConfig,
     },
+    consensus::raft::Raft,
     crypto::{Hash, Hashable},
     db::Db,
     Block, Error, ErrorKind, Result, Transaction,
@@ -56,6 +57,8 @@ pub(crate) struct Dispatcher<D: Db> {
     pool: Arc<RwLock<Pool>>,
     /// Instance of a type implementing Database trait.
     db: Arc<RwLock<D>>,
+    /// Consensus module
+    consensus: Option<Arc<RwLock<Raft>>>,
     /// PubSub subsystem to publish blockchain events.
     pubsub: Arc<Mutex<PubSub>>,
 }
@@ -66,6 +69,7 @@ impl<D: Db> Clone for Dispatcher<D> {
             config: self.config.clone(),
             pool: self.pool.clone(),
             db: self.db.clone(),
+            consensus: self.consensus.clone(),
             pubsub: self.pubsub.clone(),
         }
     }
@@ -77,12 +81,14 @@ impl<D: Db> Dispatcher<D> {
         config: Arc<BlockConfig>,
         pool: Arc<RwLock<Pool>>,
         db: Arc<RwLock<D>>,
+        consensus: Option<Arc<RwLock<Raft>>>,
         pubsub: Arc<Mutex<PubSub>>,
     ) -> Self {
         Dispatcher {
             config,
             pool,
             db,
+            consensus,
             pubsub,
         }
     }
@@ -326,6 +332,12 @@ impl<D: Db> Dispatcher<D> {
                 self.get_transaction_res_handler(tx);
                 None
             }
+            Message::Consensus { buf } => {
+                if let Some(ref consensus) = self.consensus {
+                    consensus.write().handle_message(buf);
+                }
+                None
+            }
             Message::Packed { buf } => self.packed_message_handler(buf, res_chan),
             _ => None,
         }
@@ -357,7 +369,7 @@ mod tests {
             network: "skynet".to_string(),
         });
 
-        Dispatcher::new(config, pool, db, pubsub)
+        Dispatcher::new(config, pool, db, None, pubsub)
     }
 
     fn create_db_mock(fail_condition: bool) -> MockDb {

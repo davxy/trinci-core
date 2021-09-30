@@ -27,6 +27,7 @@
 use crate::{
     base::RwLock,
     blockchain::pool::{BlockInfo, Pool},
+    consensus::raft::Raft,
     db::Db,
 };
 use std::sync::Arc;
@@ -39,6 +40,8 @@ pub(crate) struct Builder<D: Db> {
     pool: Arc<RwLock<Pool>>,
     /// Instance of a type implementing Database trait.
     db: Arc<RwLock<D>>,
+
+    consensus: Option<Arc<RwLock<Raft>>>,
 }
 
 impl<D: Db> Clone for Builder<D> {
@@ -47,17 +50,24 @@ impl<D: Db> Clone for Builder<D> {
             threshold: self.threshold,
             pool: self.pool.clone(),
             db: self.db.clone(),
+            consensus: self.consensus.clone(),
         }
     }
 }
 
 impl<D: Db> Builder<D> {
     /// Constructs a new builder.
-    pub fn new(threshold: usize, pool: Arc<RwLock<Pool>>, db: Arc<RwLock<D>>) -> Self {
+    pub fn new(
+        threshold: usize,
+        pool: Arc<RwLock<Pool>>,
+        db: Arc<RwLock<D>>,
+        consensus: Option<Arc<RwLock<Raft>>>,
+    ) -> Self {
         Builder {
             threshold,
             pool,
             db,
+            consensus,
         }
     }
 
@@ -98,6 +108,10 @@ impl<D: Db> Builder<D> {
                     }
                 }
                 count = count.checked_sub(txs_hashes.len()).unwrap_or_default();
+
+                // TODO: be sure that we are the leader.
+                // TODO: run Log Propagation part of Raft consensus.
+                // TODO: if we receive n/2 approvals then commit the entry.
 
                 let blk_info = BlockInfo {
                     hash: None,

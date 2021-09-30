@@ -38,10 +38,12 @@ bitflags::bitflags! {
         const BLOCK = 1 << 1;
         /// Any unsolicited request from the blockchain.
         const REQUEST = 1 << 2;
+        /// Unsolicited request from the consensus subsystem.
+        const CONSENSUS = 1 << 3;
     }
 }
 
-const EVENTS_NUM: usize = 3;
+const EVENTS_NUM: usize = 4;
 
 impl Serialize for Event {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -184,7 +186,7 @@ impl PubSub {
                 let info_clone = info.clone();
                 let mut msg_clone = msg.clone();
                 async_std::task::spawn(async move {
-                    debug!("[sub] '{}' notified about '{:?}' event", id_clone, event);
+                    //debug!("[sub] '{}' notified about '{:?}' event", id_clone, event);
                     if info_clone.packed {
                         let buf = rmp_serialize(&msg_clone).unwrap_or_default();
                         msg_clone = Message::Packed { buf };

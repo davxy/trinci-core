@@ -125,10 +125,17 @@ pub enum Message {
         /// Account data
         data: Vec<Option<Vec<u8>>>,
     },
+    /// Message for consensus subsystem.
+    #[serde(rename = "253")]
+    Consensus {
+        /// Opaque byte array interpreted by the consensus sub-system.
+        #[serde(with = "serde_bytes")]
+        buf: Vec<u8>,
+    },
     /// Stop blockchain service.
     #[serde(rename = "254")]
     Stop,
-    /// Packed message serialized using MessagePack.
+    /// Packed `Message` serialized using MessagePack.
     #[serde(rename = "255")]
     Packed {
         /// Serialized message bytes.

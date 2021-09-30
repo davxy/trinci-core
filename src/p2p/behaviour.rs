@@ -40,13 +40,17 @@ pub(crate) struct Behavior {
     pub mdns: Mdns,
     /// To forward incoming messages to blockchain service.
     #[behaviour(ignore)]
-    pub bc_chan: BlockRequestSender,
+    bc_chan: BlockRequestSender,
 }
 
 const MAX_TRANSMIT_SIZE: usize = 524288;
 
 impl Behavior {
-    pub fn new(peer_id: PeerId, topic: IdentTopic, bc_chan: BlockRequestSender) -> Result<Self> {
+    pub fn new(
+        peer_id: PeerId,
+        topics: Vec<&IdentTopic>,
+        bc_chan: BlockRequestSender,
+    ) -> Result<Self> {
         let mdns_fut = Mdns::new(MdnsConfig::default());
         let mdns = task::block_on(mdns_fut).map_err(|err| Error::new_ext(ErrorKind::Other, err))?;
 
@@ -55,14 +59,16 @@ impl Behavior {
             .max_transmit_size(MAX_TRANSMIT_SIZE)
             .build()
             .map_err(|err| Error::new_ext(ErrorKind::Other, err))?;
-        //let privacy = MessageAuthenticity::Anonymous;
+
         let privacy = MessageAuthenticity::Author(peer_id);
         let mut gossip =
             Gossipsub::new(privacy, config).map_err(|err| Error::new_ext(ErrorKind::Other, err))?;
 
-        gossip
-            .subscribe(&topic)
-            .map_err(|err| Error::new_ext(ErrorKind::Other, format!("{:?}", err)))?;
+        for topic in topics {
+            gossip
+                .subscribe(topic)
+                .map_err(|err| Error::new_ext(ErrorKind::Other, format!("{:?}", err)))?;
+        }
 
         Ok(Behavior {
             gossip,
@@ -99,14 +105,23 @@ impl NetworkBehaviourEventProcess<GossipsubEvent> for Behavior {
                 message,
                 message_id: _,
             } => {
-                match self
-                    .bc_chan
-                    .send_sync(Message::Packed { buf: message.data })
-                {
+                let topic_str = message.topic.as_str();
+                let topic = IdentTopic::new(topic_str);
+                let buf = message.data;
+                warn!("[p2p] incoming msg (topic {})", topic_str);
+                let msg = if topic_str.contains("validator") {
+                    warn!("Incoming consensus msg");
+                    Message::Consensus { buf }
+                } else {
+                    warn!("Incoming node msg");
+                    Message::Packed { buf }
+                };
+
+                match self.bc_chan.send_sync(msg) {
                     Ok(res_chan) => {
                         // Check if the blockchain has a response of if has dropped the response channel.
+                        // TODO: consensus responses handing?
                         if let Ok(Message::Packed { buf }) = res_chan.recv_sync() {
-                            let topic = IdentTopic::new(message.topic.as_str());
                             if let Err(err) = self.gossip.publish(topic, buf) {
                                 if !matches!(err, PublishError::InsufficientPeers) {
                                     error!("publish error: {:?}", err);
